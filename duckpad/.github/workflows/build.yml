@@ -1,0 +1,43 @@
+name: Build DuckPad
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Node Dependencies
+        run: npm install
+
+      - name: Install Tauri CLI
+        run: npm install @tauri-apps/cli@latest --save-dev
+
+      - name: Build DuckPad
+        run: npm run tauri build -- --bundles none
+
+      - name: Upload Executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuckPad-Windows
+          path: |
+            src-tauri/target/release/*.exe
