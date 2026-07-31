@@ -4,6 +4,7 @@ import SqlEditor from "./components/SqlEditor";
 import ResultsGrid from "./components/ResultsGrid";
 import SchemaExplorer from "./components/SchemaExplorer";
 import StatusBar from "./components/StatusBar";
+import PasteImportDialog from "./components/PasteImportDialog";
 
 export interface QueryResult {
   columns: string[];
@@ -33,6 +34,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [tables, setTables] = useState<TableInfo[]>([]);
   const [running, setRunning] = useState(false);
+
+  // Milestone 2: paste-to-scratch-table dialog state. `dialogText` holds
+  // whatever we already have (clipboard contents, or empty for a manual
+  // "+ Import CSV" open) so the dialog opens pre-filled when possible.
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogText, setDialogText] = useState("");
 
   const refreshSchema = useCallback(async () => {
     try {
@@ -64,9 +71,43 @@ export default function App() {
     [refreshSchema]
   );
 
+  const openImportDialog = useCallback((text: string) => {
+    setDialogText(text);
+    setDialogOpen(true);
+  }, []);
+
+  // "+ Scratch" button and Ctrl+Shift+V both try to read the OS clipboard
+  // directly via the browser Clipboard API first (fastest path — no manual
+  // paste needed). If that's denied or unsupported in this webview, we
+  // fall back to opening the dialog empty; the dialog's own textarea
+  // always accepts a normal Ctrl+V paste regardless of Clipboard API
+  // permissions, so this never leaves the user stuck.
+  const tryReadClipboard = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      openImportDialog(text);
+    } catch (e) {
+      console.warn("clipboard read denied/unavailable, opening blank import dialog", e);
+      openImportDialog("");
+    }
+  }, [openImportDialog]);
+
   useEffect(() => {
     refreshSchema();
   }, [refreshSchema]);
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        tryReadClipboard();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [tryReadClipboard]);
+
+  const nextScratchNameGuess = `scratch_${tables.filter((t) => /^scratch_\d+$/.test(t.name)).length + 1}`;
 
   return (
     <div className="app-shell">
@@ -78,7 +119,11 @@ export default function App() {
       </header>
 
       <div className="main-layout">
-        <SchemaExplorer tables={tables} />
+        <SchemaExplorer
+          tables={tables}
+          onPasteClick={tryReadClipboard}
+          onImportClick={() => openImportDialog("")}
+        />
 
         <div className="editor-and-results">
           <SqlEditor value={sql} onChange={setSql} onExecute={runQuery} running={running} />
@@ -92,6 +137,15 @@ export default function App() {
         executionMs={result?.execution_ms}
         running={running}
       />
+
+      {dialogOpen && (
+        <PasteImportDialog
+          initialText={dialogText}
+          suggestedName={nextScratchNameGuess}
+          onClose={() => setDialogOpen(false)}
+          onImported={() => refreshSchema()}
+        />
+      )}
     </div>
   );
 }

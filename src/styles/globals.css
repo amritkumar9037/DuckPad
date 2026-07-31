@@ -1,7 +1,8 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap');
-/* Note: for a truly offline build, self-host these two font files under
-   /src/assets/fonts and swap this @import for local @font-face rules —
-   left as a remote import here only for scaffold readability. */
+/* Deliberately no remote @import here — DuckPad is offline-first and this
+   file previously pulled Inter/JetBrains Mono from Google Fonts CDN at
+   startup, which silently fails (or hangs) with no network access. Using
+   system font stacks that approximate them until real font files are
+   vendored locally under /src/assets/fonts. */
 
 :root {
   --bg-0: #1e1e1e;
@@ -22,7 +23,7 @@ html, body, #root {
   margin: 0;
   background: var(--bg-0);
   color: var(--text);
-  font-family: "Inter", system-ui, sans-serif;
+  font-family: -apple-system, "Segoe UI", system-ui, Roboto, sans-serif;
   font-size: 13px;
 }
 
@@ -199,3 +200,170 @@ html, body, #root {
   font-size: 12px;
   font-weight: 600;
 }
+
+.schema-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 8px 8px;
+}
+
+.schema-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.schema-action-btn:hover { background: var(--border); }
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.dialog-panel {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.dialog-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.dialog-close:hover { color: var(--text); }
+
+.dialog-body {
+  padding: 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dialog-row { display: flex; gap: 12px; }
+.dialog-row .dialog-field { flex: 1; }
+
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.dialog-field input,
+.dialog-field select,
+.dialog-textarea {
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.dialog-textarea {
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  resize: vertical;
+}
+
+.dialog-preview-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.preview-table th, .preview-table td {
+  border: 1px solid var(--border);
+  padding: 4px 6px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.preview-col-name { font-weight: 600; margin-bottom: 3px; }
+
+.preview-type-select {
+  width: 100%;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 2px 4px;
+}
+
+.dialog-error {
+  color: var(--red);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.dialog-btn-secondary, .dialog-btn-primary {
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  border: none;
+}
+
+.dialog-btn-secondary {
+  background: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.dialog-btn-primary {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.dialog-btn-primary:disabled { opacity: 0.6; cursor: default; }

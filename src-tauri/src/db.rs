@@ -20,6 +20,8 @@ pub enum DbError {
     Duck(#[from] duckdb::Error),
     #[error("lock poisoned")]
     Lock,
+    #[error("table not found after import: {0}")]
+    NotFound(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -130,6 +132,112 @@ pub fn execute_sql(sql: &str) -> Result<QueryResult, DbError> {
         rows_affected,
         execution_ms: start.elapsed().as_millis(),
     })
+}
+
+/// A single column definition supplied by the frontend's import dialog
+/// (Milestone 2: clipboard paste / manual paste-to-table).
+#[derive(Debug, serde::Deserialize)]
+pub struct ColumnDef {
+    pub name: String,
+    pub data_type: String,
+}
+
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Renders a JSON value (as sent from the frontend's type-coerced import
+/// payload) as a DuckDB SQL literal. Values are already coerced to the
+/// right JS type client-side (numbers, booleans, strings, null), so this
+/// only has to handle escaping — not re-inferring types.
+///
+/// Deliberately literal-based rather than parameter-bound: this sidesteps
+/// depending on duckdb-rs's parameter-binding API surface, which nothing
+/// elsewhere in this codebase exercises yet. Safe here because DuckPad is
+/// a local single-user desktop tool with no untrusted network input —
+/// this is not a general-purpose SQL-building utility.
+fn json_value_to_sql_literal(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "NULL".to_string(),
+        serde_json::Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+        other => format!("'{}'", other.to_string().replace('\'', "''")),
+    }
+}
+
+/// Finds the next unused `scratch_N` name. Must be called with the DB
+/// mutex already held (see `import_table`) — does not lock itself, so it
+/// can be reused inside a call that's already holding the guard without
+/// deadlocking on the same non-reentrant Mutex.
+fn next_scratch_name_locked(conn: &Connection) -> Result<String, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_schema = 'main' AND table_name LIKE 'scratch\\_%' ESCAPE '\\'",
+    )?;
+    let names: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let max_n = names
+        .iter()
+        .filter_map(|n| n.strip_prefix("scratch_").and_then(|s| s.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0);
+    Ok(format!("scratch_{}", max_n + 1))
+}
+
+/// Public entry point for the frontend to preview the next scratch name
+/// before the user has pasted anything (locks internally).
+pub fn next_scratch_name() -> Result<String, DbError> {
+    let conn = DB.lock().map_err(|_| DbError::Lock)?;
+    next_scratch_name_locked(&conn)
+}
+
+/// Creates (replacing if it already exists) a table from column defs and
+/// row data supplied by the frontend's paste/import dialog, then returns
+/// its schema so the caller can render it immediately without a second
+/// round trip.
+pub fn import_table(
+    table_name: Option<String>,
+    columns: Vec<ColumnDef>,
+    rows: Vec<Vec<serde_json::Value>>,
+) -> Result<TableInfo, DbError> {
+    let conn = DB.lock().map_err(|_| DbError::Lock)?;
+
+    let name = match table_name {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => next_scratch_name_locked(&conn)?,
+    };
+
+    let col_defs: Vec<String> = columns
+        .iter()
+        .map(|c| format!("{} {}", quote_ident(&c.name), c.data_type))
+        .collect();
+
+    conn.execute(&format!("DROP TABLE IF EXISTS {}", quote_ident(&name)), [])?;
+    conn.execute(
+        &format!("CREATE TABLE {} ({})", quote_ident(&name), col_defs.join(", ")),
+        [],
+    )?;
+
+    if !rows.is_empty() {
+        let rows_sql: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let vals: Vec<String> = row.iter().map(json_value_to_sql_literal).collect();
+                format!("({})", vals.join(", "))
+            })
+            .collect();
+        let insert_sql = format!("INSERT INTO {} VALUES {}", quote_ident(&name), rows_sql.join(", "));
+        conn.execute(&insert_sql, [])?;
+    }
+
+    drop(conn); // release before get_schema (which locks again) to avoid deadlock
+    get_schema()?
+        .into_iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| DbError::NotFound(name.clone()))
 }
 
 /// Introspects the current schema so the frontend's Schema Explorer can

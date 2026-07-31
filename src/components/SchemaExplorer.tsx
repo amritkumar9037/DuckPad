@@ -1,9 +1,11 @@
 import { useState } from "react";
-import { Table2, ChevronRight, ChevronDown } from "lucide-react";
+import { Table2, ChevronRight, ChevronDown, Clipboard, FileUp } from "lucide-react";
 import type { TableInfo } from "../App";
 
 interface Props {
   tables: TableInfo[];
+  onPasteClick: () => void;
+  onImportClick: () => void;
 }
 
 function TableNode({ table }: { table: TableInfo }) {
@@ -29,13 +31,23 @@ function TableNode({ table }: { table: TableInfo }) {
   );
 }
 
-export default function SchemaExplorer({ tables }: Props) {
+export default function SchemaExplorer({ tables, onPasteClick, onImportClick }: Props) {
   return (
     <aside className="schema-explorer">
       <div className="schema-header">Tables</div>
+
+      <div className="schema-actions">
+        <button className="schema-action-btn" onClick={onPasteClick} title="Read clipboard now (Ctrl+Shift+V)">
+          <Clipboard size={13} /> Scratch
+        </button>
+        <button className="schema-action-btn" onClick={onImportClick} title="Paste or type data to import">
+          <FileUp size={13} /> Import CSV
+        </button>
+      </div>
+
       <div className="schema-list">
         {tables.length === 0 ? (
-          <p className="schema-empty">No tables yet — run a CREATE TABLE to get started.</p>
+          <p className="schema-empty">No tables yet — run a CREATE TABLE, or paste some data, to get started.</p>
         ) : (
           tables.map((t) => <TableNode key={t.name} table={t} />)
         )}

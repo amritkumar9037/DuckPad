@@ -9,6 +9,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::execute_sql,
             commands::get_schema,
+            commands::import_table,
+            commands::next_scratch_name,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DuckPad");

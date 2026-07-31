@@ -10,11 +10,12 @@
     "tauri": "tauri"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
     "@monaco-editor/react": "^4.6.0",
+    "@tauri-apps/api": "^2.0.0",
     "ag-grid-community": "^32.0.0",
     "ag-grid-react": "^32.0.0",
     "lucide-react": "^0.400.0",
+    "monaco-editor": "^0.56.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
