@@ -25,6 +25,9 @@ jobs:
     # cannot cross-compile -- a Windows .exe can only be built on Windows.
     needs: test
     runs-on: windows-latest
+    permissions:
+      contents: write   # needed to publish a Release; uses the auto-provided
+                        # GITHUB_TOKEN below, not a personal token
     steps:
       - uses: actions/checkout@v4
 
@@ -65,3 +68,17 @@ jobs:
           name: DuckPadLite-windows
           path: dist/DuckPadLite.exe
           retention-days: 30
+
+      - name: Publish a GitHub Release with the exe attached
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.${{ github.run_number }}
+          name: DuckPad Lite build ${{ github.run_number }}
+          body: |
+            Automated build from commit ${{ github.sha }}.
+            Download `DuckPadLite.exe` below -- no installer, no Python, no admin rights needed.
+          files: dist/DuckPadLite.exe
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
