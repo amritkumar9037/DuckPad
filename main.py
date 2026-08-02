@@ -130,7 +130,35 @@ def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOption
     dlg.title("Import options")
     dlg.configure(bg=PANEL_BG)
     dlg.geometry("720x620")
+    dlg.minsize(520, 420)
     dlg.grab_set()
+
+    result = {"ok": False}
+
+    def on_import():
+        opts.table_name = db.safe_identifier(name_var.get(), 1) or suggested_name
+        opts.column_names = [db.safe_identifier(nv.get(), i + 1) for i, (nv, _) in enumerate(column_widgets)]
+        opts.column_types = [tv.get() for _, tv in column_widgets]
+        result["ok"] = True
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    # Import/Cancel live in their own fixed-height frame packed FIRST (side=TOP,
+    # before any expanding content), so they stay visible no matter how the
+    # dialog is resized -- they were getting squeezed off-screen at the bottom
+    # when the window was shrunk, since pack() clips later-packed fixed-size
+    # widgets first when space runs out.
+    btn_row = tk.Frame(dlg, bg=PANEL_BG)
+    btn_row.pack(side=tk.TOP, fill=tk.X, padx=12, pady=10)
+    tk.Button(btn_row, text="Import", command=on_import, bg=ACCENT, fg="white", relief=tk.FLAT, font=UI_FONT).pack(
+        side=tk.RIGHT, padx=4
+    )
+    tk.Button(btn_row, text="Cancel", command=on_cancel, bg=PANEL_BG, fg=FG, relief=tk.FLAT, font=UI_FONT).pack(
+        side=tk.RIGHT, padx=4
+    )
+    ttk.Separator(dlg, orient="horizontal").pack(side=tk.TOP, fill=tk.X)
 
     top = tk.Frame(dlg, bg=PANEL_BG)
     top.pack(fill=tk.X, padx=12, pady=10)
@@ -239,27 +267,6 @@ def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOption
     sep_menu.bind("<<ComboboxSelected>>", refresh_preview)
     header_menu.bind("<<ComboboxSelected>>", refresh_preview)
     refresh_preview()
-
-    result = {"ok": False}
-
-    def on_import():
-        opts.table_name = db.safe_identifier(name_var.get(), 1) or suggested_name
-        opts.column_names = [db.safe_identifier(nv.get(), i + 1) for i, (nv, _) in enumerate(column_widgets)]
-        opts.column_types = [tv.get() for _, tv in column_widgets]
-        result["ok"] = True
-        dlg.destroy()
-
-    def on_cancel():
-        dlg.destroy()
-
-    btn_row = tk.Frame(dlg, bg=PANEL_BG)
-    btn_row.pack(fill=tk.X, padx=12, pady=10)
-    tk.Button(btn_row, text="Cancel", command=on_cancel, bg=PANEL_BG, fg=FG, relief=tk.FLAT, font=UI_FONT).pack(
-        side=tk.RIGHT, padx=4
-    )
-    tk.Button(btn_row, text="Import", command=on_import, bg=ACCENT, fg="white", relief=tk.FLAT, font=UI_FONT).pack(
-        side=tk.RIGHT, padx=4
-    )
 
     root.wait_window(dlg)
     return opts if result["ok"] else None

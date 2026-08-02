@@ -46,6 +46,7 @@ jobs:
           pyinstaller --onefile --windowed --name DuckPadLite
           --add-data "duckpad;duckpad"
           --hidden-import duckdb
+          --hidden-import uuid
           --icon "assets\icon.ico"
           main.py
 
@@ -61,6 +62,29 @@ jobs:
           }
           Write-Host "DuckPadLite.exe is running after 5 seconds (PID $($proc.Id)) -- looks healthy."
           Stop-Process -Id $proc.Id -Force
+
+      - name: Build and run the frozen DuckDB regression test
+        # 'Launches OK' doesn't mean 'works' -- this exact class of bug (frozen
+        # duckdb needing uuid at runtime even though nothing imports it
+        # directly) passed the launch check above just fine and only broke on
+        # an actual import/query. This packages scripts/duckdb_smoke_test.py
+        # with the same hidden-import flags as the real app and runs the full
+        # import -> query -> schema -> cell-update flow frozen, gating the
+        # release on it actually working, not just starting.
+        run: >
+          pyinstaller --onefile --name duckdb_smoke_test --paths .
+          --hidden-import duckdb --hidden-import uuid
+          scripts/duckdb_smoke_test.py
+
+      - name: Run the frozen DuckDB regression test
+        shell: pwsh
+        run: |
+          $output = & ".\dist\duckdb_smoke_test.exe" 2>&1
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0 -or ($output -notmatch "DUCKDB_SMOKE_OK")) {
+            Write-Error "Frozen DuckDB smoke test failed -- treating this as a build failure."
+            exit 1
+          }
 
       - name: Upload the exe as a build artifact
         uses: actions/upload-artifact@v4
