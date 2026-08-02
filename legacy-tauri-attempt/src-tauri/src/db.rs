@@ -275,3 +275,124 @@ pub fn get_schema() -> Result<Vec<TableInfo>, DbError> {
 
     Ok(tables)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // NOTE: DB is one process-wide static connection shared by every test in
+    // this binary (mirrors the app's single-connection design). Tests below
+    // use table names unique to each test and avoid asserting on the *total*
+    // schema, so they stay correct whether cargo runs them in parallel or
+    // not. Run `cargo test -- --test-threads=1` in CI anyway for determinism.
+
+    #[test]
+    fn execute_sql_runs_the_apps_default_query() {
+        // This is the literal SQL App.tsx ships as DEFAULT_SQL -- the query
+        // that fires the instant a user opens the app and presses Run.
+        let result = execute_sql("SELECT 'hello, duckpad' AS greeting, 42 AS answer;")
+            .expect("default query must not error");
+        assert_eq!(result.columns, vec!["greeting", "answer"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], serde_json::json!("hello, duckpad"));
+        assert_eq!(result.rows[0][1], serde_json::json!(42));
+    }
+
+    #[test]
+    fn execute_sql_invalid_sql_returns_error_not_panic() {
+        // The whole point of returning Result<_, DbError> instead of
+        // unwrapping: malformed SQL must surface as an error the frontend
+        // can display, never as a panic that takes down the process.
+        let result = execute_sql("SELEKT this is not sql;");
+        assert!(result.is_err(), "invalid SQL must return Err, not panic");
+    }
+
+    #[test]
+    fn execute_sql_querying_nonexistent_table_returns_error() {
+        let result = execute_sql("SELECT * FROM table_that_does_not_exist_xyz;");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn import_table_then_query_round_trip() {
+        let cols = vec![
+            ColumnDef { name: "Name".into(), data_type: "VARCHAR".into() },
+            ColumnDef { name: "Age".into(), data_type: "INTEGER".into() },
+            ColumnDef { name: "Salary".into(), data_type: "DOUBLE".into() },
+        ];
+        let rows = vec![
+            vec![serde_json::json!("John"), serde_json::json!(30), serde_json::json!(50000.0)],
+            vec![serde_json::json!("Mary"), serde_json::json!(28), serde_json::json!(60000.0)],
+        ];
+        let info = import_table(Some("test_import_roundtrip".into()), cols, rows)
+            .expect("import must succeed");
+        assert_eq!(info.name, "test_import_roundtrip");
+        assert_eq!(info.columns.len(), 3);
+
+        let result = execute_sql("SELECT * FROM test_import_roundtrip ORDER BY Age;")
+            .expect("querying the imported table must succeed");
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0][0], serde_json::json!("Mary"));
+        assert_eq!(result.rows[1][0], serde_json::json!("John"));
+    }
+
+    #[test]
+    fn import_table_replaces_existing_table_of_same_name() {
+        let cols = vec![ColumnDef { name: "x".into(), data_type: "INTEGER".into() }];
+        import_table(Some("test_replace_tbl".into()), cols.clone(), vec![vec![serde_json::json!(1)]])
+            .unwrap();
+        // Re-importing the same name should DROP + CREATE, not error or duplicate rows.
+        import_table(Some("test_replace_tbl".into()), cols, vec![vec![serde_json::json!(2)]])
+            .expect("re-importing the same table name must succeed (drop + recreate)");
+
+        let result = execute_sql("SELECT * FROM test_replace_tbl;").unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], serde_json::json!(2));
+    }
+
+    #[test]
+    fn next_scratch_name_follows_scratch_n_pattern() {
+        let name = next_scratch_name().expect("must produce a name");
+        assert!(name.starts_with("scratch_"), "got: {}", name);
+        let suffix = name.strip_prefix("scratch_").unwrap();
+        assert!(suffix.parse::<u32>().is_ok(), "suffix must be numeric, got: {}", suffix);
+    }
+
+    #[test]
+    fn import_table_without_explicit_name_uses_scratch_naming() {
+        let cols = vec![ColumnDef { name: "v".into(), data_type: "INTEGER".into() }];
+        let info = import_table(None, cols, vec![vec![serde_json::json!(1)]])
+            .expect("import without a name must fall back to scratch_N");
+        assert!(info.name.starts_with("scratch_"), "got: {}", info.name);
+    }
+
+    #[test]
+    fn ddl_then_select_in_one_multi_statement_call() {
+        // Matches the spec's "CREATE TABLE sales(...) -> schema explorer
+        // shows + sales" flow, run as one Ctrl+Enter execution.
+        let result = execute_sql(
+            "CREATE TABLE test_ddl_select_tbl(id INTEGER, amount DOUBLE); \
+             INSERT INTO test_ddl_select_tbl VALUES (1, 9.5); \
+             SELECT * FROM test_ddl_select_tbl;",
+        )
+        .expect("multi-statement DDL+DML+SELECT must succeed");
+        assert_eq!(result.columns, vec!["id", "amount"]);
+        assert_eq!(result.rows.len(), 1);
+
+        let schema = get_schema().expect("schema introspection must succeed");
+        assert!(
+            schema.iter().any(|t| t.name == "test_ddl_select_tbl"),
+            "newly created table must appear in schema without manual refresh"
+        );
+    }
+
+    #[test]
+    fn drop_table_removes_it_from_schema() {
+        execute_sql("CREATE TABLE test_drop_me(x INTEGER);").unwrap();
+        assert!(get_schema().unwrap().iter().any(|t| t.name == "test_drop_me"));
+
+        execute_sql("DROP TABLE test_drop_me;").unwrap();
+        assert!(!get_schema().unwrap().iter().any(|t| t.name == "test_drop_me"));
+    }
+}
+

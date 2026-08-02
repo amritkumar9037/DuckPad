@@ -1,0 +1,63 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    # Runs the real unit tests for parser/schema/db logic on every push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run unit tests
+        run: python -m unittest duckpad.tests.test_core -v
+
+  build-windows-exe:
+    # This is the step that produces the actual single .exe file. It runs on
+    # a real Windows machine (GitHub's hosted runner) because PyInstaller
+    # cannot cross-compile -- a Windows .exe can only be built on Windows.
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: pip install pyinstaller
+
+      - name: Run unit tests on Windows too
+        run: python -m unittest duckpad.tests.test_core -v
+
+      - name: Build single-file exe
+        run: >
+          pyinstaller --onefile --windowed --name DuckPadLite
+          --add-data "duckpad;duckpad"
+          main.py
+
+      - name: Smoke-test the built exe actually launches
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\DuckPadLite.exe" -PassThru
+          Start-Sleep -Seconds 5
+          $stillRunning = Get-Process -Id $proc.Id -ErrorAction SilentlyContinue
+          if (-not $stillRunning) {
+            Write-Error "DuckPadLite.exe exited within 5 seconds of launch -- treating this as a build failure."
+            exit 1
+          }
+          Write-Host "DuckPadLite.exe is running after 5 seconds (PID $($proc.Id)) -- looks healthy."
+          Stop-Process -Id $proc.Id -Force
+
+      - name: Upload the exe as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DuckPadLite-windows
+          path: dist/DuckPadLite.exe
+          retention-days: 30
