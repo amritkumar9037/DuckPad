@@ -3,20 +3,24 @@
 Paste tabular data (Ctrl+V), it becomes a queryable table instantly
 (table1, table2, ...), and you write SQL against it right away.
 
-Built on Python's standard library only (tkinter + sqlite3), so PyInstaller
-can package it into one .exe with no external runtime requirements.
+Built on Python's standard library (tkinter + sqlite3) plus an optional
+DuckDB backend, so PyInstaller can package it into one .exe.
 """
 
 from __future__ import annotations
-import sqlite3
+import csv
+import json
+import os
 import time
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from duckpad import parser, schema, db
 
 APP_TITLE = "DuckPad Lite"
 DEFAULT_SQL = "SELECT 'hello, duckpad' AS greeting, 42 AS answer;"
+HISTORY_LIMIT = 200
+SAVED_QUERIES_FILE = os.path.join(os.path.expanduser("~"), ".duckpad_lite_saved_queries.json")
 
 BG = "#1e1e1e"
 PANEL_BG = "#252526"
@@ -25,23 +29,384 @@ ACCENT = "#0e639c"
 MONO_FONT = ("Consolas", 11)
 UI_FONT = ("Segoe UI", 10)
 
+SQL_KEYWORDS = {
+    "SELECT", "FROM", "WHERE", "GROUP", "BY", "ORDER", "HAVING", "JOIN", "LEFT",
+    "RIGHT", "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "NULL", "INSERT",
+    "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE", "DROP",
+    "ALTER", "VIEW", "WITH", "UNION", "ALL", "INTERSECT", "EXCEPT", "LIMIT",
+    "OFFSET", "DISTINCT", "CASE", "WHEN", "THEN", "ELSE", "END", "IN", "IS",
+    "LIKE", "BETWEEN", "EXISTS", "COUNT", "SUM", "AVG", "MIN", "MAX", "OVER",
+    "PARTITION", "ASC", "DESC",
+}
+
+
+# ----------------------------------------------------------------- Engine picker
+
+def choose_engine(root: tk.Tk) -> str:
+    """Modal dialog shown at startup: SQLite or DuckDB."""
+    result = {"engine": db.ENGINE_SQLITE}
+    dlg = tk.Toplevel(root)
+    dlg.title("Choose SQL engine")
+    dlg.configure(bg=PANEL_BG)
+    dlg.resizable(False, False)
+    dlg.grab_set()
+
+    tk.Label(
+        dlg, text="Which SQL engine should this session use?",
+        bg=PANEL_BG, fg=FG, font=UI_FONT,
+    ).pack(padx=20, pady=(16, 8))
+
+    choice = tk.StringVar(value=db.ENGINE_SQLITE)
+
+    def add_option(value, label, sub):
+        frame = tk.Frame(dlg, bg=PANEL_BG)
+        frame.pack(fill=tk.X, padx=20, anchor="w")
+        tk.Radiobutton(
+            frame, text=label, variable=choice, value=value,
+            bg=PANEL_BG, fg=FG, selectcolor="#111111", activebackground=PANEL_BG,
+            activeforeground=FG, font=UI_FONT,
+        ).pack(anchor="w")
+        tk.Label(frame, text=sub, bg=PANEL_BG, fg="#9a9a9a", font=("Segoe UI", 8)).pack(
+            anchor="w", padx=22
+        )
+
+    add_option(db.ENGINE_SQLITE, "SQLite", "Always available. Full SQL, widely compatible.")
+    duckdb_sub = (
+        "Native DATE/TIMESTAMP/BOOLEAN types, analytical SQL extensions."
+        if db.HAVE_DUCKDB else
+        "Not installed in this build -- run 'pip install duckdb' to enable."
+    )
+    add_option(db.ENGINE_DUCKDB, "DuckDB", duckdb_sub)
+    if not db.HAVE_DUCKDB:
+        for child in dlg.winfo_children():
+            pass  # radio buttons stay visible but selecting it will show an error on Continue
+
+    def on_continue():
+        if choice.get() == db.ENGINE_DUCKDB and not db.HAVE_DUCKDB:
+            messagebox.showerror(
+                "DuckDB not available",
+                "The 'duckdb' Python package isn't installed in this build.\n"
+                "Falling back to SQLite for this session.",
+            )
+            result["engine"] = db.ENGINE_SQLITE
+        else:
+            result["engine"] = choice.get()
+        dlg.destroy()
+
+    tk.Button(
+        dlg, text="Continue", command=on_continue, bg=ACCENT, fg="white",
+        relief=tk.FLAT, font=UI_FONT, padx=16, pady=6,
+    ).pack(pady=16)
+
+    dlg.protocol("WM_DELETE_WINDOW", on_continue)
+    root.wait_window(dlg)
+    return result["engine"]
+
+
+# ----------------------------------------------------------------- Import dialog
+
+class ImportOptions:
+    def __init__(self):
+        self.table_name = ""
+        self.has_header = True
+        self.delimiter = "auto"
+        self.override_types: dict[int, str] = {}
+
+
+def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOptions | None:
+    """CSV import dialog with header/separator toggle and a live preview,
+    matching the spec's import-dialog fields (decimal/thousands/encoding are
+    accepted at the file-open step via 'Open CSV...'; this dialog covers the
+    fields that affect parsing of the pasted/loaded text itself)."""
+    opts = ImportOptions()
+    opts.table_name = suggested_name
+
+    dlg = tk.Toplevel(root)
+    dlg.title("Import options")
+    dlg.configure(bg=PANEL_BG)
+    dlg.geometry("640x480")
+    dlg.grab_set()
+
+    top = tk.Frame(dlg, bg=PANEL_BG)
+    top.pack(fill=tk.X, padx=12, pady=10)
+
+    tk.Label(top, text="Table name:", bg=PANEL_BG, fg=FG, font=UI_FONT).grid(row=0, column=0, sticky="w")
+    name_var = tk.StringVar(value=suggested_name)
+    tk.Entry(top, textvariable=name_var, bg="#111111", fg=FG, insertbackground="white", font=UI_FONT, width=24).grid(
+        row=0, column=1, sticky="w", padx=8
+    )
+
+    tk.Label(top, text="Header row:", bg=PANEL_BG, fg=FG, font=UI_FONT).grid(row=1, column=0, sticky="w", pady=(8, 0))
+    header_var = tk.StringVar(value="auto")
+    header_menu = ttk.Combobox(top, textvariable=header_var, values=["auto", "yes", "no"], width=10, state="readonly")
+    header_menu.grid(row=1, column=1, sticky="w", padx=8, pady=(8, 0))
+
+    tk.Label(top, text="Separator:", bg=PANEL_BG, fg=FG, font=UI_FONT).grid(row=2, column=0, sticky="w", pady=(8, 0))
+    sep_var = tk.StringVar(value="auto")
+    sep_menu = ttk.Combobox(
+        top, textvariable=sep_var,
+        values=["auto", "Comma", "Tab", "Pipe", "Semicolon", "Space"], width=10, state="readonly",
+    )
+    sep_menu.grid(row=2, column=1, sticky="w", padx=8, pady=(8, 0))
+
+    preview_label = tk.Label(dlg, text="Preview:", bg=PANEL_BG, fg=FG, font=UI_FONT, anchor="w")
+    preview_label.pack(fill=tk.X, padx=12, pady=(10, 0))
+    preview_tree = ttk.Treeview(dlg, show="headings", height=10)
+    preview_tree.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+
+    sep_map = {"Comma": ",", "Tab": "\t", "Pipe": "|", "Semicolon": ";", "Space": " "}
+
+    def refresh_preview(*_):
+        delim = sep_map.get(sep_var.get(), None) or parser.detect_delimiter(raw_text)
+        rows = parser.split_rows(raw_text, delim)
+        if not rows:
+            return
+        header_choice = header_var.get()
+        if header_choice == "auto":
+            has_header = parser.detect_header(rows)
+        else:
+            has_header = header_choice == "yes"
+
+        ncols = max(len(r) for r in rows)
+        if has_header:
+            headers, data = rows[0], rows[1:]
+        else:
+            headers, data = [f"col_{i + 1}" for i in range(ncols)], rows
+
+        preview_tree.delete(*preview_tree.get_children())
+        cols = [f"c{i}" for i in range(ncols)]
+        preview_tree["columns"] = cols
+        for i, c in enumerate(cols):
+            label = headers[i] if i < len(headers) else f"col_{i + 1}"
+            preview_tree.heading(c, text=label)
+            preview_tree.column(c, width=100, anchor="w")
+        for row in data[:20]:
+            preview_tree.insert("", tk.END, values=row)
+
+        opts.delimiter = delim
+        opts.has_header = has_header
+
+    sep_menu.bind("<<ComboboxSelected>>", refresh_preview)
+    header_menu.bind("<<ComboboxSelected>>", refresh_preview)
+    refresh_preview()
+
+    result = {"ok": False}
+
+    def on_import():
+        opts.table_name = db.safe_identifier(name_var.get(), 1) or suggested_name
+        result["ok"] = True
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    btn_row = tk.Frame(dlg, bg=PANEL_BG)
+    btn_row.pack(fill=tk.X, padx=12, pady=10)
+    tk.Button(btn_row, text="Cancel", command=on_cancel, bg=PANEL_BG, fg=FG, relief=tk.FLAT, font=UI_FONT).pack(
+        side=tk.RIGHT, padx=4
+    )
+    tk.Button(btn_row, text="Import", command=on_import, bg=ACCENT, fg="white", relief=tk.FLAT, font=UI_FONT).pack(
+        side=tk.RIGHT, padx=4
+    )
+
+    root.wait_window(dlg)
+    return opts if result["ok"] else None
+
+
+# ----------------------------------------------------------------- SQL tab
+
+class SqlTab(tk.Frame):
+    """One SQL editor + results grid pane, hosted inside the app's Notebook."""
+
+    def __init__(self, parent, app: "DuckPadApp", title: str):
+        super().__init__(parent, bg=BG)
+        self.app = app
+        self.title = title
+        self._last_result: db.QueryResult | None = None
+        self._result_source_table: str | None = None
+        self._result_pk_col: str | None = None
+
+        pane = tk.PanedWindow(self, orient=tk.VERTICAL, bg=BG, sashwidth=4)
+        pane.pack(fill=tk.BOTH, expand=True)
+
+        editor_frame = tk.Frame(pane, bg=BG)
+        gutter_row = tk.Frame(editor_frame, bg=BG)
+        gutter_row.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self.linenos = tk.Text(
+            gutter_row, width=4, bg="#1a1a1a", fg="#6a6a6a", bd=0,
+            font=MONO_FONT, state="disabled", takefocus=0,
+        )
+        self.linenos.pack(side=tk.LEFT, fill=tk.Y)
+
+        self.sql_text = tk.Text(
+            gutter_row, bg="#111111", fg="#d4d4d4", insertbackground="white",
+            font=MONO_FONT, undo=True, wrap="none", height=8,
+        )
+        self.sql_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.sql_text.insert("1.0", DEFAULT_SQL)
+
+        for tag, color in [
+            ("kw", "#569cd6"), ("str", "#ce9178"), ("comment", "#6a9955"),
+        ]:
+            self.sql_text.tag_configure(tag, foreground=color)
+
+        self.sql_text.bind("<KeyRelease>", self._on_editor_changed)
+        self.sql_text.bind("<Control-slash>", self._toggle_comment)
+        self.sql_text.bind("<Control-Return>", lambda e: (self.app.run_current_tab(), "break")[1])
+        self._on_editor_changed()
+
+        pane.add(editor_frame, minsize=140)
+
+        results_frame = tk.Frame(pane, bg=BG)
+        tk.Label(results_frame, text="Results", bg=BG, fg=FG, font=UI_FONT, anchor="w").pack(
+            fill=tk.X, padx=6, pady=(4, 0)
+        )
+        self.results_tree = ttk.Treeview(results_frame, show="headings")
+        vsb = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_tree.yview)
+        self.results_tree.configure(yscrollcommand=vsb.set)
+        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0), pady=4)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
+        self.results_tree.bind("<Double-1>", self._on_cell_double_click)
+        pane.add(results_frame, minsize=150)
+
+    def _on_editor_changed(self, event=None):
+        # Line numbers gutter
+        content = self.sql_text.get("1.0", tk.END)
+        n_lines = content.count("\n") or 1
+        self.linenos.configure(state="normal")
+        self.linenos.delete("1.0", tk.END)
+        self.linenos.insert("1.0", "\n".join(str(i) for i in range(1, n_lines + 1)))
+        self.linenos.configure(state="disabled")
+        self._highlight_syntax()
+
+    def _highlight_syntax(self):
+        text = self.sql_text
+        for tag in ("kw", "str", "comment"):
+            text.tag_remove(tag, "1.0", tk.END)
+        content = text.get("1.0", tk.END)
+        for match_start, word in _tokenize(content):
+            if word.upper() in SQL_KEYWORDS:
+                start_idx = f"1.0+{match_start}c"
+                end_idx = f"1.0+{match_start + len(word)}c"
+                text.tag_add("kw", start_idx, end_idx)
+        for m in _STRING_RE.finditer(content):
+            text.tag_add("str", f"1.0+{m.start()}c", f"1.0+{m.end()}c")
+        for m in _COMMENT_RE.finditer(content):
+            text.tag_add("comment", f"1.0+{m.start()}c", f"1.0+{m.end()}c")
+
+    def _toggle_comment(self, event=None):
+        try:
+            start_line = int(self.sql_text.index("sel.first").split(".")[0])
+            end_line = int(self.sql_text.index("sel.last").split(".")[0])
+        except tk.TclError:
+            start_line = end_line = int(self.sql_text.index("insert").split(".")[0])
+
+        lines_commented = []
+        for ln in range(start_line, end_line + 1):
+            line_text = self.sql_text.get(f"{ln}.0", f"{ln}.end")
+            lines_commented.append(line_text.lstrip().startswith("--"))
+        should_uncomment = all(lines_commented) and lines_commented
+
+        for ln in range(start_line, end_line + 1):
+            line_text = self.sql_text.get(f"{ln}.0", f"{ln}.end")
+            if should_uncomment:
+                stripped = line_text.lstrip()
+                prefix_len = len(line_text) - len(stripped)
+                if stripped.startswith("-- "):
+                    new_text = line_text[:prefix_len] + stripped[3:]
+                elif stripped.startswith("--"):
+                    new_text = line_text[:prefix_len] + stripped[2:]
+                else:
+                    new_text = line_text
+            else:
+                new_text = "-- " + line_text
+            self.sql_text.delete(f"{ln}.0", f"{ln}.end")
+            self.sql_text.insert(f"{ln}.0", new_text)
+
+        self._on_editor_changed()
+        return "break"
+
+    def _on_cell_double_click(self, event):
+        if not self._result_source_table or not self._result_pk_col:
+            return  # editing only supported for a plain "SELECT * FROM <one table>" result
+        row_id = self.results_tree.identify_row(event.y)
+        col_id = self.results_tree.identify_column(event.x)
+        if not row_id or not col_id:
+            return
+        col_index = int(col_id.replace("#", "")) - 1
+        columns = list(self.results_tree["columns"])
+        if col_index < 0 or col_index >= len(columns):
+            return
+        target_column = columns[col_index]
+        current_values = list(self.results_tree.item(row_id)["values"])
+        pk_index = columns.index(self._result_pk_col) if self._result_pk_col in columns else 0
+        pk_value = current_values[pk_index]
+        old_value = current_values[col_index]
+
+        new_value = simpledialog.askstring(
+            "Edit cell", f"{target_column}:", initialvalue=str(old_value), parent=self,
+        )
+        if new_value is None or new_value == str(old_value):
+            return
+
+        try:
+            sql_ran = self.app.database.update_cell(
+                self._result_source_table, self._result_pk_col, pk_value, target_column, new_value
+            )
+        except Exception as e:
+            messagebox.showerror("Update failed", str(e))
+            return
+
+        self.app.add_history(sql_ran)
+        current_values[col_index] = new_value
+        self.results_tree.item(row_id, values=current_values)
+        self.app.set_status(f"Updated {self._result_source_table}.{target_column}")
+
+    def render_results(self, result: db.QueryResult, source_table: str | None, pk_col: str | None):
+        self._last_result = result
+        self._result_source_table = source_table
+        self._result_pk_col = pk_col
+        self.results_tree.delete(*self.results_tree.get_children())
+        self.results_tree["columns"] = result.columns
+        for col in result.columns:
+            self.results_tree.heading(col, text=col)
+            self.results_tree.column(col, width=120, anchor="w")
+        for row in result.rows:
+            self.results_tree.insert("", tk.END, values=row)
+
+
+_STRING_RE = __import__("re").compile(r"'[^']*'")
+_COMMENT_RE = __import__("re").compile(r"--[^\n]*")
+_WORD_RE = __import__("re").compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _tokenize(text: str):
+    for m in _WORD_RE.finditer(text):
+        yield m.start(), m.group(0)
+
+
+# ----------------------------------------------------------------- Main app
 
 class DuckPadApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, engine: str):
         self.root = root
-        self.root.title(APP_TITLE)
-        self.root.geometry("1100x720")
+        self.root.title(f"{APP_TITLE} [{engine}]")
+        self.root.geometry("1150x760")
         self.root.configure(bg=BG)
 
-        self.database = db.Database()
+        self.database = db.Database(engine=engine)
+        self.history: list[str] = []
+        self.saved_queries: dict[str, str] = self._load_saved_queries()
+
         self._build_style()
         self._build_toolbar()
         self._build_main_panes()
         self._build_status_bar()
 
         self.root.bind_all("<Control-v>", self._on_paste)
-        self.root.bind_all("<Control-Return>", self._on_run)
 
+        self.new_tab()
         self.refresh_schema()
         self.set_status("Ready")
 
@@ -56,6 +421,9 @@ class DuckPadApp:
         style.configure("Treeview", background=PANEL_BG, fieldbackground=PANEL_BG, foreground=FG, borderwidth=0)
         style.configure("Treeview.Heading", background="#333333", foreground=FG, relief="flat")
         style.map("Treeview", background=[("selected", ACCENT)])
+        style.configure("TNotebook", background=BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background=PANEL_BG, foreground=FG, padding=[10, 4])
+        style.map("TNotebook.Tab", background=[("selected", ACCENT)])
 
     def _build_toolbar(self):
         bar = tk.Frame(self.root, bg=PANEL_BG)
@@ -65,49 +433,32 @@ class DuckPadApp:
             b = tk.Button(
                 bar, text=label, command=cmd, bg=PANEL_BG, fg=FG,
                 activebackground=ACCENT, activeforeground="white",
-                relief=tk.FLAT, padx=10, pady=4, font=UI_FONT,
+                relief=tk.FLAT, padx=8, pady=4, font=UI_FONT,
             )
             b.pack(side=tk.LEFT, padx=2, pady=2)
             return b
 
         btn("Paste (Ctrl+V)", self._on_paste)
         btn("Open CSV", self._on_open_csv)
-        btn("Run (Ctrl+Enter)", self._on_run)
+        btn("Run (Ctrl+Enter)", self.run_current_tab)
         btn("Export CSV", self._on_export_csv)
+        btn("New Tab", self.new_tab)
+        btn("Save Query", self._on_save_query)
+        btn("Saved Queries", self._on_show_saved_queries)
+        btn("History", self._on_show_history)
 
     def _build_main_panes(self):
         paned = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg=BG, sashwidth=4)
         paned.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        # Left: schema explorer
         left = tk.Frame(paned, bg=PANEL_BG)
         tk.Label(left, text="Tables", bg=PANEL_BG, fg=FG, font=UI_FONT, anchor="w").pack(fill=tk.X, padx=6, pady=4)
         self.schema_tree = ttk.Treeview(left, show="tree")
         self.schema_tree.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
         paned.add(left, minsize=180, width=220)
 
-        # Right: SQL editor (top) + results (bottom), stacked
-        right = tk.PanedWindow(paned, orient=tk.VERTICAL, bg=BG, sashwidth=4)
-        paned.add(right, minsize=400)
-
-        editor_frame = tk.Frame(right, bg=BG)
-        tk.Label(editor_frame, text="SQL Editor", bg=BG, fg=FG, font=UI_FONT, anchor="w").pack(fill=tk.X, padx=6, pady=(4, 0))
-        self.sql_text = tk.Text(
-            editor_frame, bg="#111111", fg="#d4d4d4", insertbackground="white",
-            font=MONO_FONT, undo=True, wrap="none", height=8,
-        )
-        self.sql_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        self.sql_text.insert("1.0", DEFAULT_SQL)
-        right.add(editor_frame, minsize=120)
-
-        results_frame = tk.Frame(right, bg=BG)
-        tk.Label(results_frame, text="Results", bg=BG, fg=FG, font=UI_FONT, anchor="w").pack(fill=tk.X, padx=6, pady=(4, 0))
-        self.results_tree = ttk.Treeview(results_frame, show="headings")
-        vsb = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_tree.yview)
-        self.results_tree.configure(yscrollcommand=vsb.set)
-        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0), pady=4)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
-        right.add(results_frame, minsize=150)
+        self.notebook = ttk.Notebook(paned)
+        paned.add(self.notebook, minsize=500)
 
     def _build_status_bar(self):
         self.status_var = tk.StringVar(value="Ready")
@@ -122,14 +473,57 @@ class DuckPadApp:
     def set_status(self, text: str):
         self.status_var.set(text)
 
-    def _import_text(self, text: str, table_name: str | None = None):
+    def current_tab(self) -> SqlTab | None:
+        try:
+            widget_name = self.notebook.select()
+            if not widget_name:
+                return None
+            return self.notebook.nametowidget(widget_name)
+        except (tk.TclError, KeyError):
+            return None
+
+    def new_tab(self):
+        tab = SqlTab(self.notebook, self, f"Query {len(self.notebook.tabs()) + 1}")
+        self.notebook.add(tab, text=tab.title)
+        self.notebook.select(tab)
+        return tab
+
+    def add_history(self, sql: str):
+        sql = sql.strip()
+        if not sql:
+            return
+        if self.history and self.history[-1] == sql:
+            return
+        self.history.append(sql)
+        if len(self.history) > HISTORY_LIMIT:
+            self.history.pop(0)
+
+    def _load_saved_queries(self) -> dict[str, str]:
+        if os.path.exists(SAVED_QUERIES_FILE):
+            try:
+                with open(SAVED_QUERIES_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _persist_saved_queries(self):
+        try:
+            with open(SAVED_QUERIES_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.saved_queries, f, indent=2)
+        except OSError:
+            pass  # saved-queries persistence is best-effort, never fatal
+
+    def _import_text(self, text: str, table_name: str | None = None, delim: str | None = None, has_header: bool | None = None):
         if not text.strip():
             return
-        delim = parser.detect_delimiter(text)
+        if delim is None:
+            delim = parser.detect_delimiter(text)
         rows = parser.split_rows(text, delim)
         if not rows:
             return
-        has_header = parser.detect_header(rows)
+        if has_header is None:
+            has_header = parser.detect_header(rows)
         ncols = max(len(r) for r in rows)
 
         if has_header:
@@ -146,14 +540,17 @@ class DuckPadApp:
 
         try:
             info = self.database.import_table(table_name, columns, data)
-        except sqlite3.Error as e:
+        except Exception as e:
             messagebox.showerror("Import failed", str(e))
             return
 
-        self.sql_text.delete("1.0", tk.END)
-        self.sql_text.insert("1.0", f"SELECT *\nFROM {info.name};")
+        tab = self.current_tab() or self.new_tab()
+        tab.sql_text.delete("1.0", tk.END)
+        select_sql = f"SELECT *\nFROM {info.name};"
+        tab.sql_text.insert("1.0", select_sql)
+        tab._on_editor_changed()
         self.refresh_schema()
-        self._run_query(f"SELECT * FROM {info.name};")
+        self._run_query_in_tab(tab, select_sql)
         self.set_status(f"Imported {len(data)} row(s) into {info.name}")
 
     def _on_paste(self, event=None):
@@ -163,7 +560,7 @@ class DuckPadApp:
             self.set_status("Clipboard is empty or not text")
             return "break"
         self._import_text(text)
-        return "break"  # prevent tkinter's default paste-into-focused-widget behavior
+        return "break"
 
     def _on_open_csv(self):
         path = filedialog.askopenfilename(
@@ -173,53 +570,106 @@ class DuckPadApp:
             return
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
-        self._import_text(text)
 
-    def _on_run(self, event=None):
-        sql = self.sql_text.get("1.0", tk.END)
-        self._run_query(sql)
-        return "break"
+        suggested = db.safe_identifier(os.path.splitext(os.path.basename(path))[0], 1) or self.database.next_scratch_name()
+        opts = show_import_dialog(self.root, text, suggested)
+        if opts is None:
+            return
+        self._import_text(text, table_name=opts.table_name, delim=opts.delimiter, has_header=opts.has_header)
 
-    def _run_query(self, sql: str):
+    def run_current_tab(self, event=None):
+        tab = self.current_tab()
+        if tab is None:
+            return
+        sql = tab.sql_text.get("1.0", tk.END)
+        self._run_query_in_tab(tab, sql)
+
+    def _run_query_in_tab(self, tab: SqlTab, sql: str):
         self.set_status("Running…")
         self.root.update_idletasks()
         start = time.perf_counter()
         try:
             result = self.database.execute_sql(sql)
-        except sqlite3.Error as e:
+        except Exception as e:
             messagebox.showerror("SQL Error", str(e))
             self.set_status(f"Error: {e}")
             return
         elapsed = (time.perf_counter() - start) * 1000.0
 
-        self._render_results(result)
+        source_table, pk_col = _infer_single_table_and_pk(sql, result.columns)
+        tab.render_results(result, source_table, pk_col)
+        self.add_history(sql)
         self.refresh_schema()
         self.set_status(f"Ready   {len(result.rows)} row(s)   {elapsed:.1f} ms")
 
-    def _render_results(self, result: db.QueryResult):
-        self.results_tree.delete(*self.results_tree.get_children())
-        self.results_tree["columns"] = result.columns
-        for col in result.columns:
-            self.results_tree.heading(col, text=col)
-            self.results_tree.column(col, width=120, anchor="w")
-        for row in result.rows:
-            self.results_tree.insert("", tk.END, values=row)
-        self._last_result = result
-
     def _on_export_csv(self):
-        if not getattr(self, "_last_result", None) or not self._last_result.columns:
+        tab = self.current_tab()
+        if not tab or not tab._last_result or not tab._last_result.columns:
             messagebox.showinfo("Export CSV", "Run a query first.")
             return
         path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
         if not path:
             return
-        import csv
-
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(self._last_result.columns)
-            writer.writerows(self._last_result.rows)
+            writer.writerow(tab._last_result.columns)
+            writer.writerows(tab._last_result.rows)
         self.set_status(f"Exported to {path}")
+
+    def _on_save_query(self):
+        tab = self.current_tab()
+        if not tab:
+            return
+        sql = tab.sql_text.get("1.0", tk.END).strip()
+        if not sql:
+            return
+        name = simpledialog.askstring("Save query", "Name for this query:", parent=self.root)
+        if not name:
+            return
+        self.saved_queries[name] = sql
+        self._persist_saved_queries()
+        self.set_status(f"Saved query '{name}'")
+
+    def _on_show_saved_queries(self):
+        self._show_picker_dialog(
+            "Saved queries", list(self.saved_queries.items()),
+            on_pick=lambda sql: self._load_sql_into_tab(sql),
+        )
+
+    def _on_show_history(self):
+        items = [(f"{i + 1}", sql) for i, sql in enumerate(reversed(self.history))]
+        self._show_picker_dialog("Query history", items, on_pick=lambda sql: self._load_sql_into_tab(sql))
+
+    def _load_sql_into_tab(self, sql: str):
+        tab = self.current_tab() or self.new_tab()
+        tab.sql_text.delete("1.0", tk.END)
+        tab.sql_text.insert("1.0", sql)
+        tab._on_editor_changed()
+
+    def _show_picker_dialog(self, title: str, items: list[tuple[str, str]], on_pick):
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.configure(bg=PANEL_BG)
+        dlg.geometry("500x400")
+
+        listbox = tk.Listbox(dlg, bg="#111111", fg=FG, font=MONO_FONT, selectbackground=ACCENT)
+        listbox.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        for name, sql in items:
+            preview = sql.replace("\n", " ")[:80]
+            listbox.insert(tk.END, f"{name}: {preview}")
+
+        def on_select(event=None):
+            sel = listbox.curselection()
+            if not sel:
+                return
+            _, sql = items[sel[0]]
+            on_pick(sql)
+            dlg.destroy()
+
+        listbox.bind("<Double-1>", on_select)
+        tk.Button(
+            dlg, text="Load", command=on_select, bg=ACCENT, fg="white", relief=tk.FLAT, font=UI_FONT
+        ).pack(pady=(0, 8))
 
     def refresh_schema(self):
         self.schema_tree.delete(*self.schema_tree.get_children())
@@ -229,9 +679,29 @@ class DuckPadApp:
                 self.schema_tree.insert(node, tk.END, text=f"{col.name}   {col.data_type}")
 
 
+def _infer_single_table_and_pk(sql: str, result_columns: list[str]) -> tuple[str | None, str | None]:
+    """Best-effort detection of 'this result came straight from one table,
+    editable via its first column as a pseudo-key' -- powers double-click
+    cell editing. Deliberately conservative: only a plain single-table
+    SELECT (no JOIN, no aggregation) is treated as editable."""
+    import re
+
+    stripped = sql.strip().rstrip(";")
+    m = re.match(r"(?is)^select\s+\*\s+from\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:where\s+.*)?$", stripped)
+    if not m:
+        return None, None
+    table = m.group(1)
+    if not result_columns:
+        return None, None
+    return table, result_columns[0]
+
+
 def main():
     root = tk.Tk()
-    DuckPadApp(root)
+    root.withdraw()
+    engine = choose_engine(root)
+    root.deiconify()
+    DuckPadApp(root, engine)
     root.mainloop()
 
 

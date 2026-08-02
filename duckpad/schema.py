@@ -83,3 +83,22 @@ def sqlite_type(inferred: str) -> str:
         TEXT: "TEXT",
         NULL: "TEXT",
     }[inferred]
+
+
+def duckdb_type(inferred: str) -> str:
+    """Maps our inferred type to a native DuckDB column type. Unlike SQLite,
+    DuckDB has real BOOLEAN/DATE/TIMESTAMP types, so this mapping is exact
+    rather than an affinity workaround."""
+    return {
+        BOOLEAN: "BOOLEAN",
+        INTEGER: "BIGINT",
+        REAL: "DOUBLE",
+        DATE: "DATE",
+        TIMESTAMP: "TIMESTAMP",
+        TEXT: "VARCHAR",
+        NULL: "VARCHAR",
+    }[inferred]
+
+
+def native_type(inferred: str, engine: str) -> str:
+    return duckdb_type(inferred) if engine == "duckdb" else sqlite_type(inferred)

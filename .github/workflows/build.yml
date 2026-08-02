@@ -7,13 +7,15 @@ on:
 
 jobs:
   test:
-    # Runs the real unit tests for parser/schema/db logic on every push.
+    # Runs the real unit tests for parser/schema/db logic (both engines) on every push.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install duckdb (optional engine)
+        run: pip install duckdb
       - name: Run unit tests
         run: python -m unittest duckpad.tests.test_core -v
 
@@ -30,8 +32,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install PyInstaller
-        run: pip install pyinstaller
+      - name: Install dependencies
+        run: pip install pyinstaller duckdb
 
       - name: Run unit tests on Windows too
         run: python -m unittest duckpad.tests.test_core -v
@@ -40,6 +42,7 @@ jobs:
         run: >
           pyinstaller --onefile --windowed --name DuckPadLite
           --add-data "duckpad;duckpad"
+          --hidden-import duckdb
           main.py
 
       - name: Smoke-test the built exe actually launches

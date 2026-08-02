@@ -51,7 +51,7 @@ class TestSchema(unittest.TestCase):
 
 class TestDb(unittest.TestCase):
     def setUp(self):
-        self.d = db.Database()
+        self.d = db.Database(engine=db.ENGINE_SQLITE)
 
     def test_paste_as_table_full_workflow(self):
         # The exact "Paste as Table" scenario from the user's addendum:
@@ -111,6 +111,66 @@ class TestDb(unittest.TestCase):
         self.d.import_table("dup", [("x", schema.INTEGER)], [["2"]])
         result = self.d.execute_sql("SELECT * FROM dup;")
         self.assertEqual(result.rows, [[2]])
+
+    def test_update_cell_generates_and_runs_update(self):
+        self.d.import_table(
+            "people", [("id", schema.INTEGER), ("name", schema.TEXT)],
+            [["1", "John"], ["2", "Mary"]],
+        )
+        sql = self.d.update_cell("people", "id", 1, "name", "Jonathan")
+        self.assertIn("UPDATE", sql)
+        result = self.d.execute_sql("SELECT name FROM people WHERE id = 1;")
+        self.assertEqual(result.rows, [["Jonathan"]])
+        # unaffected row stays put
+        result2 = self.d.execute_sql("SELECT name FROM people WHERE id = 2;")
+        self.assertEqual(result2.rows, [["Mary"]])
+
+
+@unittest.skipUnless(db.HAVE_DUCKDB, "duckdb package not installed")
+class TestDbDuckDB(unittest.TestCase):
+    """Same core behaviors as TestDb, run against the DuckDB engine, since
+    the two backends share coercion/type-mapping logic that diverges
+    internally (see db._coerce and schema.native_type)."""
+
+    def setUp(self):
+        self.d = db.Database(engine=db.ENGINE_DUCKDB)
+
+    def test_paste_as_table_full_workflow(self):
+        raw = "ID\tName\tDepartment\n1\tAlice\tHR\n2\tBob\tFinance\n"
+        delim = parser.detect_delimiter(raw)
+        rows = parser.split_rows(raw, delim)
+        header, data = rows[0], rows[1:]
+        columns = [
+            (db.safe_identifier(header[i], i + 1), schema.infer_column_type([r[i] for r in data]))
+            for i in range(len(header))
+        ]
+        info = self.d.import_table(self.d.next_scratch_name(), columns, data)
+        self.assertEqual(info.name, "table1")
+        result = self.d.execute_sql("SELECT * FROM table1 ORDER BY ID;")
+        self.assertEqual(result.rows[0], [1, "Alice", "HR"])
+
+    def test_native_date_type(self):
+        # DuckDB has a real DATE type -- confirm dates round-trip as dates,
+        # not strings (this is the whole reason to offer DuckDB as an option).
+        info = self.d.import_table(
+            "events", [("id", schema.INTEGER), ("d", schema.DATE)],
+            [["1", "2024-06-01"]],
+        )
+        col_types = {c.name: c.data_type for c in info.columns}
+        self.assertEqual(schema.native_type(schema.DATE, "duckdb"), "DATE")
+        result = self.d.execute_sql("SELECT d FROM events;")
+        import datetime
+        self.assertEqual(result.rows[0][0], datetime.date(2024, 6, 1))
+
+    def test_invalid_sql_raises_not_crashes(self):
+        with self.assertRaises(Exception):
+            self.d.execute_sql("SELEKT not valid sql;")
+
+    def test_update_cell(self):
+        self.d.import_table("people", [("id", schema.INTEGER), ("name", schema.TEXT)], [["1", "John"]])
+        self.d.update_cell("people", "id", 1, "name", "Jonathan")
+        result = self.d.execute_sql("SELECT name FROM people WHERE id = 1;")
+        self.assertEqual(result.rows, [["Jonathan"]])
 
 
 import sqlite3  # noqa: E402  (used in TestDb.test_invalid_sql_raises_not_crashes)

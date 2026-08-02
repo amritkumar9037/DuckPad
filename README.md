@@ -9,43 +9,58 @@ No import wizard, no manual schema, no database connection dialog.
 
 This project started as a Tauri + React + Monaco + AG Grid + DuckDB build
 (see `legacy-tauri-attempt/` for that code, kept for reference, not maintained).
-It's now **Python + tkinter + sqlite3**, packaged into a single `.exe` by
-PyInstaller. Reasoning:
+It's now **Python + tkinter + sqlite3/duckdb**, packaged into a single `.exe`
+by PyInstaller. Reasoning:
 
 - **tkinter and sqlite3 are both in Python's standard library.** Nothing to
   bundle, nothing to version-mismatch, nothing that can silently fail to
   register at runtime.
 - **PyInstaller's `--onefile` mode is the most battle-tested "one exe, zero
   installs" packager that exists** — that's the actual ask.
-- Every piece of this was built and verified end-to-end in the same
-  environment that wrote it: the parsing/type-inference/SQL logic has real
-  passing unit tests, and the GUI itself was launched headlessly (Xvfb),
-  driven through the exact "paste Excel data -> table1 created -> SQL
-  pre-filled -> results shown" flow, and confirmed not to crash -- not asserted,
-  actually run. The packaged `--onefile` binary was also launched and
-  confirmed to stay alive. That's a materially stronger guarantee than the
-  Tauri attempt ever got, because that stack couldn't be compiled or rendered
-  in the environment building it.
+- Every piece of this has been built and verified end-to-end in the same
+  environment that wrote it: unit tests actually run (not just written), the
+  GUI was launched headlessly (Xvfb) and driven through every flow described
+  below, and the packaged `--onefile` binary (including the DuckDB backend)
+  was launched and confirmed to stay alive.
 
-## What works (verified)
+## Milestone status (honest, mapped to the original spec)
 
-- Delimiter auto-detection: tab, comma, pipe, semicolon, or space-separated.
-- Header row auto-detection (works even with just 2 data rows).
-- Column type inference: INTEGER -> REAL, BOOLEAN, DATE/TIMESTAMP -> TEXT
-  fallback, smallest-safe-type first.
-- Paste (Ctrl+V) or Open CSV -> auto-creates `table1`/`table2`/... in an
-  in-memory SQLite database, no manual steps.
-- SQL editor with Ctrl+Enter / Run button -- full SQLite SQL (joins, CTEs,
-  window functions, etc.).
-- Results grid, schema explorer (auto-refreshes after DDL), CSV export.
-- 17 unit tests covering parser/schema/db logic, run on every push via CI.
+**Milestone 1 — Foundation**: done except syntax highlighting is keyword-only
+(no full tokenizer), and there's no autocomplete or bracket-matching yet.
+Dark theme, SQL editor with line numbers + comment-toggle (Ctrl+/), Ctrl+Enter
+execution, results grid — all working.
 
-## What's NOT here yet
+**Milestone 2 — Data Import**: done. Clipboard paste and "Open CSV" both
+auto-detect delimiter/header/types and create `table1`/`table2`/... with zero
+manual steps. "Open CSV" additionally shows an import dialog (table name,
+header yes/no/auto, separator override, live preview) for when auto-detection
+needs a nudge.
 
-- Cell editing / undo-redo, right-click context menus, multi-tab workspace,
-  query history, autocomplete, syntax highlighting.
-- The original spec's DuckDB backend (this uses SQLite -- full SQL, but not
-  DuckDB's analytical-query extensions like `PIVOT`/`QUALIFY`).
+**Milestone 3 — Data Management**: done for the common case. Double-clicking
+a cell in a plain `SELECT * FROM <table>` result generates and runs an
+`UPDATE ... WHERE <first-column> = <value>` — this is a heuristic (treats the
+first column as the key), not full primary-key introspection, so it's most
+reliable on tables with an obvious ID column. CSV export works.
+
+**Milestone 4 — Productivity**: done at a basic level. Multiple SQL tabs,
+query history (session-based, up to 200 entries), and saved queries
+(persisted to a small JSON file in your home directory, so they survive
+restarts). No workspace save/restore of full session state yet.
+
+**Backend choice**: a startup dialog lets you pick SQLite or DuckDB per
+session. SQLite is always available; DuckDB requires the `duckdb` package
+(bundled into the `.exe` by CI, so the built binary has it either way).
+DuckDB gives native DATE/TIMESTAMP/BOOLEAN types instead of SQLite's
+text/integer affinity workarounds.
+
+## What's still not here
+
+- Full autocomplete, bracket-matching, find/replace in the SQL editor.
+- Cell editing for JOINs/aggregated results (only plain single-table SELECTs
+  are treated as editable).
+- Workspace save/open (persisting which tabs + queries were open).
+- Right-click context menus (rename/duplicate/export-per-table), column-level
+  datatype override UI.
 
 ## Getting the exe
 
@@ -56,6 +71,7 @@ artifact. No Python, no installer, no admin rights needed to run it.
 ## Running from source
 
 ```bash
+pip install duckdb   # optional -- only needed if you want the DuckDB engine option
 python3 main.py
 ```
 
@@ -68,8 +84,8 @@ python3 -m unittest duckpad.tests.test_core -v
 ## Building the exe yourself
 
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name DuckPadLite --add-data "duckpad;duckpad" main.py
+pip install pyinstaller duckdb
+pyinstaller --onefile --windowed --name DuckPadLite --add-data "duckpad;duckpad" --hidden-import duckdb main.py
 ```
 
 (On Windows, use `;` as the `--add-data` separator as shown above; on
