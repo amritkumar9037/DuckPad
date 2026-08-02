@@ -318,14 +318,19 @@ class SqlTab(tk.Frame):
         pane.add(editor_frame, minsize=140)
 
         results_frame = tk.Frame(pane, bg=BG)
-        tk.Label(results_frame, text="Results", bg=BG, fg=FG, font=UI_FONT, anchor="w").pack(
-            fill=tk.X, padx=6, pady=(4, 0)
+        tk.Label(results_frame, text="Results", bg=BG, fg=FG, font=UI_FONT, anchor="w").grid(
+            row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=(4, 0)
         )
+        results_frame.grid_rowconfigure(1, weight=1)
+        results_frame.grid_columnconfigure(0, weight=1)
+
         self.results_tree = ttk.Treeview(results_frame, show="headings")
-        vsb = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_tree.yview)
-        self.results_tree.configure(yscrollcommand=vsb.set)
-        self.results_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0), pady=4)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
+        results_vsb = ttk.Scrollbar(results_frame, orient="vertical", command=self.results_tree.yview)
+        results_hsb = ttk.Scrollbar(results_frame, orient="horizontal", command=self.results_tree.xview)
+        self.results_tree.configure(yscrollcommand=results_vsb.set, xscrollcommand=results_hsb.set)
+        self.results_tree.grid(row=1, column=0, sticky="nsew", padx=(4, 0), pady=(4, 0))
+        results_vsb.grid(row=1, column=1, sticky="ns", pady=(4, 0))
+        results_hsb.grid(row=2, column=0, sticky="ew", padx=(4, 0), pady=(0, 4))
         self.results_tree.bind("<Double-1>", self._on_cell_double_click)
         pane.add(results_frame, minsize=150)
 
@@ -428,9 +433,12 @@ class SqlTab(tk.Frame):
         self._result_pk_col = pk_col
         self.results_tree.delete(*self.results_tree.get_children())
         self.results_tree["columns"] = result.columns
-        for col in result.columns:
+        for i, col in enumerate(result.columns):
+            sample_values = [row[i] for row in result.rows[:200] if i < len(row)]
+            longest = max([len(col)] + [len(str(v)) for v in sample_values], default=len(col))
+            width_px = min(max(longest * 8 + 16, 70), 320)  # readable floor/ceiling either way
             self.results_tree.heading(col, text=col)
-            self.results_tree.column(col, width=120, anchor="w")
+            self.results_tree.column(col, width=width_px, minwidth=50, anchor="w", stretch=False)
         for row in result.rows:
             self.results_tree.insert("", tk.END, values=row)
 
@@ -515,6 +523,8 @@ class DuckPadApp:
         tk.Label(left, text="Tables", bg=PANEL_BG, fg=FG, font=UI_FONT, anchor="w").pack(fill=tk.X, padx=6, pady=4)
         self.schema_tree = ttk.Treeview(left, show="tree")
         self.schema_tree.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.schema_tree.bind("<Button-3>", self._on_schema_right_click)
+        self._schema_item_map: dict[str, tuple] = {}  # iid -> ("table", name) or ("column", table, col)
         paned.add(left, minsize=180, width=220)
 
         self.notebook = ttk.Notebook(paned)
@@ -722,10 +732,154 @@ class DuckPadApp:
 
     def refresh_schema(self):
         self.schema_tree.delete(*self.schema_tree.get_children())
+        self._schema_item_map = {}
         for table in self.database.get_schema():
             node = self.schema_tree.insert("", tk.END, text=table.name, open=True)
+            self._schema_item_map[node] = ("table", table.name)
             for col in table.columns:
-                self.schema_tree.insert(node, tk.END, text=f"{col.name}   {col.data_type}")
+                col_iid = self.schema_tree.insert(node, tk.END, text=f"{col.name}   {col.data_type}")
+                self._schema_item_map[col_iid] = ("column", table.name, col.name)
+
+    def _on_schema_right_click(self, event):
+        iid = self.schema_tree.identify_row(event.y)
+        if not iid:
+            return
+        self.schema_tree.selection_set(iid)
+        entry = self._schema_item_map.get(iid)
+        if entry is None:
+            return
+
+        menu = tk.Menu(self.root, tearoff=0, bg=PANEL_BG, fg=FG, activebackground=ACCENT, activeforeground="white")
+        if entry[0] == "table":
+            table_name = entry[1]
+            menu.add_command(label="View Data", command=lambda: self._table_view_data(table_name))
+            menu.add_command(label="Rename Table...", command=lambda: self._table_rename(table_name))
+            menu.add_command(label="Duplicate Table", command=lambda: self._table_duplicate(table_name))
+            menu.add_command(label="Export CSV...", command=lambda: self._table_export_csv(table_name))
+            menu.add_separator()
+            menu.add_command(label="Delete Table", command=lambda: self._table_delete(table_name))
+        else:
+            _, table_name, col_name = entry
+            menu.add_command(label="Rename Column...", command=lambda: self._column_rename(table_name, col_name))
+            menu.add_command(label="Change Datatype...", command=lambda: self._column_change_type(table_name, col_name))
+            menu.add_separator()
+            menu.add_command(label="Delete Column", command=lambda: self._column_delete(table_name, col_name))
+
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _table_view_data(self, table_name: str):
+        tab = self.current_tab() or self.new_tab()
+        sql = f"SELECT * FROM {table_name};"
+        tab.sql_text.delete("1.0", tk.END)
+        tab.sql_text.insert("1.0", sql)
+        tab._on_editor_changed()
+        self._run_query_in_tab(tab, sql)
+
+    def _table_rename(self, table_name: str):
+        new_name = simpledialog.askstring("Rename table", "New name:", initialvalue=table_name, parent=self.root)
+        if not new_name or new_name == table_name:
+            return
+        try:
+            actual = self.database.rename_table(table_name, new_name)
+        except Exception as e:
+            messagebox.showerror("Rename failed", str(e))
+            return
+        self.refresh_schema()
+        self.set_status(f"Renamed {table_name} -> {actual}")
+
+    def _table_duplicate(self, table_name: str):
+        suggested = f"{table_name}_copy"
+        new_name = simpledialog.askstring("Duplicate table", "Name for the copy:", initialvalue=suggested, parent=self.root)
+        if not new_name:
+            return
+        try:
+            actual = self.database.duplicate_table(table_name, new_name)
+        except Exception as e:
+            messagebox.showerror("Duplicate failed", str(e))
+            return
+        self.refresh_schema()
+        self.set_status(f"Duplicated {table_name} -> {actual}")
+
+    def _table_delete(self, table_name: str):
+        if not messagebox.askyesno("Delete table", f"Delete table '{table_name}'? This cannot be undone."):
+            return
+        try:
+            self.database.drop_table(table_name)
+        except Exception as e:
+            messagebox.showerror("Delete failed", str(e))
+            return
+        self.refresh_schema()
+        self.set_status(f"Deleted {table_name}")
+
+    def _table_export_csv(self, table_name: str):
+        try:
+            result = self.database.execute_sql(f"SELECT * FROM {table_name};")
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")])
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(result.columns)
+            writer.writerows(result.rows)
+        self.set_status(f"Exported {table_name} to {path}")
+
+    def _column_rename(self, table_name: str, col_name: str):
+        new_name = simpledialog.askstring("Rename column", "New name:", initialvalue=col_name, parent=self.root)
+        if not new_name or new_name == col_name:
+            return
+        try:
+            actual = self.database.rename_column(table_name, col_name, new_name)
+        except Exception as e:
+            messagebox.showerror("Rename failed", str(e))
+            return
+        self.refresh_schema()
+        self.set_status(f"Renamed {table_name}.{col_name} -> {actual}")
+
+    def _column_change_type(self, table_name: str, col_name: str):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Change datatype")
+        dlg.configure(bg=PANEL_BG)
+        dlg.grab_set()
+        tk.Label(dlg, text=f"New datatype for {table_name}.{col_name}:", bg=PANEL_BG, fg=FG, font=UI_FONT).pack(
+            padx=16, pady=(16, 6)
+        )
+        type_var = tk.StringVar(value=schema.TEXT)
+        combo = ttk.Combobox(dlg, textvariable=type_var, values=TYPE_CHOICES, state="readonly", width=14)
+        combo.pack(padx=16, pady=6)
+
+        def on_confirm():
+            try:
+                self.database.change_column_type(table_name, col_name, type_var.get())
+            except Exception as e:
+                messagebox.showerror("Change datatype failed", str(e))
+                dlg.destroy()
+                return
+            self.refresh_schema()
+            self.set_status(f"Changed {table_name}.{col_name} to {type_var.get()}")
+            dlg.destroy()
+
+        btn_row = tk.Frame(dlg, bg=PANEL_BG)
+        btn_row.pack(pady=(6, 16))
+        tk.Button(btn_row, text="Cancel", command=dlg.destroy, bg=PANEL_BG, fg=FG, relief=tk.FLAT, font=UI_FONT).pack(
+            side=tk.RIGHT, padx=4
+        )
+        tk.Button(btn_row, text="Change", command=on_confirm, bg=ACCENT, fg="white", relief=tk.FLAT, font=UI_FONT).pack(
+            side=tk.RIGHT, padx=4
+        )
+
+    def _column_delete(self, table_name: str, col_name: str):
+        if not messagebox.askyesno("Delete column", f"Delete column '{col_name}' from '{table_name}'? This cannot be undone."):
+            return
+        try:
+            self.database.drop_column(table_name, col_name)
+        except Exception as e:
+            messagebox.showerror("Delete failed", str(e))
+            return
+        self.refresh_schema()
+        self.set_status(f"Deleted column {col_name} from {table_name}")
 
 
 def _infer_single_table_and_pk(sql: str, result_columns: list[str]) -> tuple[str | None, str | None]:

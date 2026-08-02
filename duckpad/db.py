@@ -233,3 +233,66 @@ class Database:
             with self.conn:
                 self.conn.execute(sql, [new_value, pk_value])
         return sql.replace("?", "{}").format(repr(new_value), repr(pk_value))
+
+    # ----------------------------------------------------- table/column management
+
+    def rename_table(self, old_name: str, new_name: str) -> str:
+        new_name = safe_identifier(new_name, 1)
+        sql = f'ALTER TABLE "{old_name}" RENAME TO "{new_name}";'
+        self._exec_ddl(sql)
+        return new_name
+
+    def drop_table(self, name: str):
+        self._exec_ddl(f'DROP TABLE "{name}";')
+
+    def duplicate_table(self, name: str, new_name: str | None = None) -> str:
+        new_name = safe_identifier(new_name, 1) if new_name else self.next_scratch_name()
+        self._exec_ddl(f'CREATE TABLE "{new_name}" AS SELECT * FROM "{name}";')
+        return new_name
+
+    def rename_column(self, table: str, old_col: str, new_col: str) -> str:
+        new_col = safe_identifier(new_col, 1)
+        self._exec_ddl(f'ALTER TABLE "{table}" RENAME COLUMN "{old_col}" TO "{new_col}";')
+        return new_col
+
+    def drop_column(self, table: str, col: str):
+        self._exec_ddl(f'ALTER TABLE "{table}" DROP COLUMN "{col}";')
+
+    def change_column_type(self, table: str, col: str, new_inferred_type: str):
+        """Changes one column's datatype. DuckDB supports ALTER COLUMN ... TYPE
+        directly (with an automatic cast). SQLite has no such statement, so we
+        rebuild the table: create a copy with the new type, cast the target
+        column's data across, drop the original, rename the copy into place."""
+        native = schema_mod.native_type(new_inferred_type, self.engine)
+        if self.engine == ENGINE_DUCKDB:
+            self._exec_ddl(f'ALTER TABLE "{table}" ALTER COLUMN "{col}" TYPE {native};')
+            return
+
+        tables = {t.name: t for t in self._get_schema_sqlite()}
+        info = tables[table]
+        col_defs = []
+        select_exprs = []
+        for c in info.columns:
+            if c.name == col:
+                col_defs.append(f'"{c.name}" {native}')
+                select_exprs.append(f'CAST("{c.name}" AS {native})')
+            else:
+                col_defs.append(f'"{c.name}" {c.data_type}')
+                select_exprs.append(f'"{c.name}"')
+
+        tmp_name = f"__tmp_{table}_retype"
+        with self.conn:
+            self.conn.execute(f'DROP TABLE IF EXISTS "{tmp_name}";')
+            self.conn.execute(f'CREATE TABLE "{tmp_name}" ({", ".join(col_defs)});')
+            self.conn.execute(
+                f'INSERT INTO "{tmp_name}" SELECT {", ".join(select_exprs)} FROM "{table}";'
+            )
+            self.conn.execute(f'DROP TABLE "{table}";')
+            self.conn.execute(f'ALTER TABLE "{tmp_name}" RENAME TO "{table}";')
+
+    def _exec_ddl(self, sql: str):
+        if self.engine == ENGINE_DUCKDB:
+            self.conn.execute(sql)
+        else:
+            with self.conn:
+                self.conn.execute(sql)

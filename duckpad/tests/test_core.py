@@ -125,6 +125,52 @@ class TestDb(unittest.TestCase):
         result2 = self.d.execute_sql("SELECT name FROM people WHERE id = 2;")
         self.assertEqual(result2.rows, [["Mary"]])
 
+    def test_rename_table(self):
+        self.d.import_table("old_name", [("x", schema.INTEGER)], [["1"]])
+        self.d.rename_table("old_name", "new_name")
+        names = [t.name for t in self.d.get_schema()]
+        self.assertIn("new_name", names)
+        self.assertNotIn("old_name", names)
+        self.assertEqual(self.d.execute_sql("SELECT * FROM new_name;").rows, [[1]])
+
+    def test_drop_table(self):
+        self.d.import_table("gone_soon", [("x", schema.INTEGER)], [["1"]])
+        self.d.drop_table("gone_soon")
+        self.assertNotIn("gone_soon", [t.name for t in self.d.get_schema()])
+
+    def test_duplicate_table(self):
+        self.d.import_table("original", [("x", schema.INTEGER)], [["1"], ["2"]])
+        self.d.duplicate_table("original", "copy_of_original")
+        names = [t.name for t in self.d.get_schema()]
+        self.assertIn("original", names)
+        self.assertIn("copy_of_original", names)
+        self.assertEqual(
+            self.d.execute_sql("SELECT * FROM copy_of_original ORDER BY x;").rows, [[1], [2]]
+        )
+
+    def test_rename_column(self):
+        self.d.import_table("t", [("old_col", schema.TEXT)], [["hi"]])
+        self.d.rename_column("t", "old_col", "new_col")
+        cols = [c.name for t in self.d.get_schema() if t.name == "t" for c in t.columns]
+        self.assertEqual(cols, ["new_col"])
+        self.assertEqual(self.d.execute_sql("SELECT new_col FROM t;").rows, [["hi"]])
+
+    def test_drop_column(self):
+        self.d.import_table("t2", [("keep", schema.TEXT), ("remove", schema.TEXT)], [["a", "b"]])
+        self.d.drop_column("t2", "remove")
+        cols = [c.name for t in self.d.get_schema() if t.name == "t2" for c in t.columns]
+        self.assertEqual(cols, ["keep"])
+
+    def test_change_column_type(self):
+        # SQLite path -- no native ALTER COLUMN TYPE, so this exercises the
+        # rebuild-the-table logic (create-copy -> cast -> drop -> rename).
+        self.d.import_table("t3", [("n", schema.TEXT)], [["30"], ["25"]])
+        self.d.change_column_type("t3", "n", schema.INTEGER)
+        result = self.d.execute_sql("SELECT n FROM t3 ORDER BY n;")
+        self.assertEqual(result.rows, [[25], [30]])
+        col_type = [c.data_type for t in self.d.get_schema() if t.name == "t3" for c in t.columns][0]
+        self.assertEqual(col_type, "INTEGER")
+
 
 @unittest.skipUnless(db.HAVE_DUCKDB, "duckdb package not installed")
 class TestDbDuckDB(unittest.TestCase):
@@ -171,6 +217,29 @@ class TestDbDuckDB(unittest.TestCase):
         self.d.update_cell("people", "id", 1, "name", "Jonathan")
         result = self.d.execute_sql("SELECT name FROM people WHERE id = 1;")
         self.assertEqual(result.rows, [["Jonathan"]])
+
+    def test_rename_duplicate_table(self):
+        self.d.import_table("original", [("x", schema.INTEGER)], [["1"], ["2"]])
+        self.d.rename_table("original", "renamed")
+        self.d.duplicate_table("renamed", "copy")
+        names = [t.name for t in self.d.get_schema()]
+        self.assertIn("renamed", names)
+        self.assertIn("copy", names)
+
+    def test_rename_drop_column(self):
+        self.d.import_table("t", [("old_col", schema.TEXT), ("keep", schema.TEXT)], [["hi", "yo"]])
+        self.d.rename_column("t", "old_col", "new_col")
+        self.d.drop_column("t", "keep")
+        cols = [c.name for t in self.d.get_schema() if t.name == "t" for c in t.columns]
+        self.assertEqual(cols, ["new_col"])
+
+    def test_change_column_type_native(self):
+        # DuckDB path -- uses native ALTER COLUMN ... TYPE, not the SQLite
+        # rebuild-the-table workaround.
+        self.d.import_table("t3", [("n", schema.TEXT)], [["30"], ["25"]])
+        self.d.change_column_type("t3", "n", schema.INTEGER)
+        result = self.d.execute_sql("SELECT n FROM t3 ORDER BY n;")
+        self.assertEqual(result.rows, [[25], [30]])
 
 
 import sqlite3  # noqa: E402  (used in TestDb.test_invalid_sql_raises_not_crashes)
