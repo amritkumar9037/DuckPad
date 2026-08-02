@@ -43,6 +43,7 @@ jobs:
           pyinstaller --onefile --windowed --name DuckPadLite
           --add-data "duckpad;duckpad"
           --hidden-import duckdb
+          --icon "assets\icon.ico"
           main.py
 
       - name: Smoke-test the built exe actually launches

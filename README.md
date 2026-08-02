@@ -53,14 +53,19 @@ session. SQLite is always available; DuckDB requires the `duckdb` package
 DuckDB gives native DATE/TIMESTAMP/BOOLEAN types instead of SQLite's
 text/integer affinity workarounds.
 
+**Paste behavior**: `Ctrl+V` is normal text paste everywhere (SQL editor,
+dialogs). `Ctrl+Shift+V` is "paste as table" — works no matter which panel
+has focus, and always opens the import dialog first so you can rename the
+table and override any column's name/datatype before anything is created
+(same dialog "Open CSV" uses).
+
 ## What's still not here
 
 - Full autocomplete, bracket-matching, find/replace in the SQL editor.
 - Cell editing for JOINs/aggregated results (only plain single-table SELECTs
   are treated as editable).
 - Workspace save/open (persisting which tabs + queries were open).
-- Right-click context menus (rename/duplicate/export-per-table), column-level
-  datatype override UI.
+- Right-click context menus (rename/duplicate/export-per-table).
 
 ## Getting the exe
 
@@ -85,11 +90,12 @@ python3 -m unittest duckpad.tests.test_core -v
 
 ```bash
 pip install pyinstaller duckdb
-pyinstaller --onefile --windowed --name DuckPadLite --add-data "duckpad;duckpad" --hidden-import duckdb main.py
+pyinstaller --onefile --windowed --name DuckPadLite --add-data "duckpad;duckpad" --hidden-import duckdb --icon "assets/icon.ico" main.py
 ```
 
 (On Windows, use `;` as the `--add-data` separator as shown above; on
-macOS/Linux it's `:`.)
+macOS/Linux it's `:`. The icon only embeds on Windows/macOS builds --
+PyInstaller ignores `--icon` on Linux, which is expected.)
 
 ## License
 

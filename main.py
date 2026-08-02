@@ -105,26 +105,31 @@ def choose_engine(root: tk.Tk) -> str:
 
 # ----------------------------------------------------------------- Import dialog
 
+TYPE_CHOICES = [schema.INTEGER, schema.REAL, schema.BOOLEAN, schema.DATE, schema.TIMESTAMP, schema.TEXT]
+
+
 class ImportOptions:
     def __init__(self):
         self.table_name = ""
         self.has_header = True
         self.delimiter = "auto"
-        self.override_types: dict[int, str] = {}
+        self.column_names: list[str] = []
+        self.column_types: list[str] = []
 
 
 def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOptions | None:
-    """CSV import dialog with header/separator toggle and a live preview,
-    matching the spec's import-dialog fields (decimal/thousands/encoding are
-    accepted at the file-open step via 'Open CSV...'; this dialog covers the
-    fields that affect parsing of the pasted/loaded text itself)."""
+    """Import dialog: table name, header/separator toggle, live preview, and
+    -- per the user's request -- an editable column list so the table name
+    and every column's name/datatype can be overridden before import, not
+    just auto-detected silently. Used for both 'Paste as Table' and
+    'Open CSV'."""
     opts = ImportOptions()
     opts.table_name = suggested_name
 
     dlg = tk.Toplevel(root)
     dlg.title("Import options")
     dlg.configure(bg=PANEL_BG)
-    dlg.geometry("640x480")
+    dlg.geometry("720x620")
     dlg.grab_set()
 
     top = tk.Frame(dlg, bg=PANEL_BG)
@@ -149,12 +154,51 @@ def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOption
     )
     sep_menu.grid(row=2, column=1, sticky="w", padx=8, pady=(8, 0))
 
-    preview_label = tk.Label(dlg, text="Preview:", bg=PANEL_BG, fg=FG, font=UI_FONT, anchor="w")
-    preview_label.pack(fill=tk.X, padx=12, pady=(10, 0))
-    preview_tree = ttk.Treeview(dlg, show="headings", height=10)
-    preview_tree.pack(fill=tk.BOTH, expand=True, padx=12, pady=6)
+    tk.Label(dlg, text="Preview:", bg=PANEL_BG, fg=FG, font=UI_FONT, anchor="w").pack(
+        fill=tk.X, padx=12, pady=(10, 0)
+    )
+    preview_tree = ttk.Treeview(dlg, show="headings", height=6)
+    preview_tree.pack(fill=tk.BOTH, expand=False, padx=12, pady=(4, 8))
+
+    tk.Label(dlg, text="Columns (edit name / datatype before importing):", bg=PANEL_BG, fg=FG, font=UI_FONT, anchor="w").pack(
+        fill=tk.X, padx=12
+    )
+    columns_canvas_frame = tk.Frame(dlg, bg=PANEL_BG)
+    columns_canvas_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 8))
+    columns_canvas = tk.Canvas(columns_canvas_frame, bg=PANEL_BG, highlightthickness=0)
+    columns_scrollbar = ttk.Scrollbar(columns_canvas_frame, orient="vertical", command=columns_canvas.yview)
+    columns_inner = tk.Frame(columns_canvas, bg=PANEL_BG)
+    columns_inner.bind("<Configure>", lambda e: columns_canvas.configure(scrollregion=columns_canvas.bbox("all")))
+    columns_canvas.create_window((0, 0), window=columns_inner, anchor="nw")
+    columns_canvas.configure(yscrollcommand=columns_scrollbar.set)
+    columns_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    columns_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
     sep_map = {"Comma": ",", "Tab": "\t", "Pipe": "|", "Semicolon": ";", "Space": " "}
+    column_widgets: list[tuple[tk.StringVar, tk.StringVar]] = []  # (name_var, type_var) per column
+
+    def rebuild_column_editor(headers: list[str], inferred_types: list[str]):
+        for child in columns_inner.winfo_children():
+            child.destroy()
+        column_widgets.clear()
+
+        tk.Label(columns_inner, text="Column name", bg=PANEL_BG, fg="#9a9a9a", font=UI_FONT).grid(
+            row=0, column=0, sticky="w", padx=(2, 12)
+        )
+        tk.Label(columns_inner, text="Datatype", bg=PANEL_BG, fg="#9a9a9a", font=UI_FONT).grid(
+            row=0, column=1, sticky="w"
+        )
+        for i, (h, t) in enumerate(zip(headers, inferred_types)):
+            name_v = tk.StringVar(value=h)
+            type_v = tk.StringVar(value=t)
+            tk.Entry(
+                columns_inner, textvariable=name_v, bg="#111111", fg=FG,
+                insertbackground="white", font=UI_FONT, width=22,
+            ).grid(row=i + 1, column=0, sticky="w", padx=(2, 12), pady=2)
+            ttk.Combobox(
+                columns_inner, textvariable=type_v, values=TYPE_CHOICES, width=12, state="readonly",
+            ).grid(row=i + 1, column=1, sticky="w", pady=2)
+            column_widgets.append((name_v, type_v))
 
     def refresh_preview(*_):
         delim = sep_map.get(sep_var.get(), None) or parser.detect_delimiter(raw_text)
@@ -169,22 +213,28 @@ def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOption
 
         ncols = max(len(r) for r in rows)
         if has_header:
-            headers, data = rows[0], rows[1:]
+            raw_headers, data = rows[0], rows[1:]
         else:
-            headers, data = [f"col_{i + 1}" for i in range(ncols)], rows
+            raw_headers, data = [f"col_{i + 1}" for i in range(ncols)], rows
 
         preview_tree.delete(*preview_tree.get_children())
         cols = [f"c{i}" for i in range(ncols)]
         preview_tree["columns"] = cols
-        for i, c in enumerate(cols):
-            label = headers[i] if i < len(headers) else f"col_{i + 1}"
-            preview_tree.heading(c, text=label)
-            preview_tree.column(c, width=100, anchor="w")
+        safe_headers = []
+        inferred_types = []
+        for i in range(ncols):
+            label = raw_headers[i] if i < len(raw_headers) else f"col_{i + 1}"
+            safe_headers.append(db.safe_identifier(label, i + 1))
+            preview_tree.heading(cols[i], text=label)
+            preview_tree.column(cols[i], width=100, anchor="w")
+            values = [r[i] if i < len(r) else "" for r in data]
+            inferred_types.append(schema.infer_column_type(values))
         for row in data[:20]:
             preview_tree.insert("", tk.END, values=row)
 
         opts.delimiter = delim
         opts.has_header = has_header
+        rebuild_column_editor(safe_headers, inferred_types)
 
     sep_menu.bind("<<ComboboxSelected>>", refresh_preview)
     header_menu.bind("<<ComboboxSelected>>", refresh_preview)
@@ -194,6 +244,8 @@ def show_import_dialog(root, raw_text: str, suggested_name: str) -> ImportOption
 
     def on_import():
         opts.table_name = db.safe_identifier(name_var.get(), 1) or suggested_name
+        opts.column_names = [db.safe_identifier(nv.get(), i + 1) for i, (nv, _) in enumerate(column_widgets)]
+        opts.column_types = [tv.get() for _, tv in column_widgets]
         result["ok"] = True
         dlg.destroy()
 
@@ -404,7 +456,8 @@ class DuckPadApp:
         self._build_main_panes()
         self._build_status_bar()
 
-        self.root.bind_all("<Control-v>", self._on_paste)
+        self.root.bind_all("<Control-Shift-V>", self._on_paste_as_table)
+        self.root.bind_all("<Control-Shift-v>", self._on_paste_as_table)  # some platforms report lowercase
 
         self.new_tab()
         self.refresh_schema()
@@ -438,7 +491,7 @@ class DuckPadApp:
             b.pack(side=tk.LEFT, padx=2, pady=2)
             return b
 
-        btn("Paste (Ctrl+V)", self._on_paste)
+        btn("Paste as Table (Ctrl+Shift+V)", self._on_paste_as_table)
         btn("Open CSV", self._on_open_csv)
         btn("Run (Ctrl+Enter)", self.run_current_tab)
         btn("Export CSV", self._on_export_csv)
@@ -514,32 +567,15 @@ class DuckPadApp:
         except OSError:
             pass  # saved-queries persistence is best-effort, never fatal
 
-    def _import_text(self, text: str, table_name: str | None = None, delim: str | None = None, has_header: bool | None = None):
-        if not text.strip():
-            return
-        if delim is None:
-            delim = parser.detect_delimiter(text)
-        rows = parser.split_rows(text, delim)
+    def _import_with_options(self, text: str, opts: ImportOptions):
+        rows = parser.split_rows(text, opts.delimiter)
         if not rows:
             return
-        if has_header is None:
-            has_header = parser.detect_header(rows)
-        ncols = max(len(r) for r in rows)
-
-        if has_header:
-            header, data = rows[0], rows[1:]
-        else:
-            header, data = [f"col_{i + 1}" for i in range(ncols)], rows
-
-        columns = []
-        for i in range(ncols):
-            col_name = db.safe_identifier(header[i] if i < len(header) else "", i + 1)
-            values = [r[i] if i < len(r) else "" for r in data]
-            inferred = schema.infer_column_type(values)
-            columns.append((col_name, inferred))
+        data = rows[1:] if opts.has_header else rows
+        columns = list(zip(opts.column_names, opts.column_types))
 
         try:
-            info = self.database.import_table(table_name, columns, data)
+            info = self.database.import_table(opts.table_name, columns, data)
         except Exception as e:
             messagebox.showerror("Import failed", str(e))
             return
@@ -553,13 +589,19 @@ class DuckPadApp:
         self._run_query_in_tab(tab, select_sql)
         self.set_status(f"Imported {len(data)} row(s) into {info.name}")
 
-    def _on_paste(self, event=None):
+    def _on_paste_as_table(self, event=None):
         try:
             text = self.root.clipboard_get()
         except tk.TclError:
             self.set_status("Clipboard is empty or not text")
             return "break"
-        self._import_text(text)
+        if not text.strip():
+            self.set_status("Clipboard is empty")
+            return "break"
+        suggested = self.database.next_scratch_name()
+        opts = show_import_dialog(self.root, text, suggested)
+        if opts is not None:
+            self._import_with_options(text, opts)
         return "break"
 
     def _on_open_csv(self):
@@ -575,7 +617,7 @@ class DuckPadApp:
         opts = show_import_dialog(self.root, text, suggested)
         if opts is None:
             return
-        self._import_text(text, table_name=opts.table_name, delim=opts.delimiter, has_header=opts.has_header)
+        self._import_with_options(text, opts)
 
     def run_current_tab(self, event=None):
         tab = self.current_tab()
